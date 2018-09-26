@@ -64,7 +64,9 @@ func mmap(f *os.File, offset int64, length int) (out []byte, err error) {
 	}
 
 	// Create the memory map.
-	addr, errno := syscall.MapViewOfFile(h, syscall.FILE_MAP_READ, 0, 0, uintptr(length))
+	offsetlo := uint32(offset >> 32)
+	offsethi := uint32(offset) & 0xffffffff
+	addr, errno := syscall.MapViewOfFile(h, syscall.FILE_MAP_READ, offsetlo, offsethi, uintptr(length))
 	if addr == 0 {
 		return nil, os.NewSyscallError("MapViewOfFile", errno)
 	}

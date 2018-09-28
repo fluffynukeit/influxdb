@@ -43,32 +43,40 @@ func openSharedFile(f *os.File) (file *os.File, err error) {
 	return os.NewFile(uintptr(h), fileName), nil
 }
 
-func mmap(f *os.File, offset int64, length int) (out []byte, err error) {
+func NewMmap(f *os.File, offset int64, length int) (*Mmap, err error) {
 	// TODO: Add support for anonymous mapping on windows
 	if f == nil {
 		return make([]byte, length), nil
 	}
 
+	// Offset must be a multiple of the page size, typically 4096. We'll
+	// extend the mmap range at the beginning so that it starts at the 
+	// page boundary, then return a slice starting at the requested offset.
+	pageSize := int64(os.Getpagesize())
+	pageStart := int64((offset / pageSize) * pageSize) // offset to prev boundary
+	pageDelta := offset - pageStart // shift from boundary to requested location
+	mapLength := length + int(pageDelta)
+
 	// Open a file mapping handle.
-	sizelo := uint32(length >> 32)
-	sizehi := uint32(length) & 0xffffffff
+	sizelo := uint32(mapLength >> 32)
+	sizehi := uint32(mapLength) & 0xffffffff
 
 	sharedHandle, errno := openSharedFile(f)
 	if errno != nil {
-		return nil, os.NewSyscallError("CreateFile", errno)
+		return nil, nil, os.NewSyscallError("CreateFile", errno)
 	}
 
 	h, errno := syscall.CreateFileMapping(syscall.Handle(sharedHandle.Fd()), nil, syscall.PAGE_READONLY, sizelo, sizehi, nil)
 	if h == 0 {
-		return nil, os.NewSyscallError("CreateFileMapping", errno)
+		return nil, nil, os.NewSyscallError("CreateFileMapping", errno)
 	}
 
 	// Create the memory map.
-	offsetlo := uint32(offset >> 32)
-	offsethi := uint32(offset) & 0xffffffff
-	addr, errno := syscall.MapViewOfFile(h, syscall.FILE_MAP_READ, offsetlo, offsethi, uintptr(length))
+	pageStartlo := uint32(pageStart >> 32)
+	pageStarthi := uint32(pageStart) & 0xffffffff
+	addr, errno := syscall.MapViewOfFile(h, syscall.FILE_MAP_READ, pageStartlo, pageStarthi, uintptr(mapLength))
 	if addr == 0 {
-		return nil, os.NewSyscallError("MapViewOfFile", errno)
+		return nil, nil, os.NewSyscallError("MapViewOfFile", errno)
 	}
 
 	handleLock.Lock()
@@ -78,9 +86,15 @@ func mmap(f *os.File, offset int64, length int) (out []byte, err error) {
 
 	// Convert to a byte array.
 	hdr := (*reflect.SliceHeader)(unsafe.Pointer(&out))
-	hdr.Data = uintptr(unsafe.Pointer(addr))
+	hdr.Data = uintptr(unsafe.Pointer(addr+pageDelta))
 	hdr.Len = length
 	hdr.Cap = length
+
+	m := &Mmap{}
+	m.backend = out
+	m.bytes = out[pageDelta:]
+
+	return m, nil
 
 	return
 }
@@ -88,11 +102,15 @@ func mmap(f *os.File, offset int64, length int) (out []byte, err error) {
 // munmap Windows implementation
 // Based on: https://github.com/edsrzf/mmap-go
 // Based on: https://github.com/boltdb/bolt/bolt_windows.go
-func munmap(b []byte) (err error) {
+func (m *MMap) close() (err error) {
 	handleLock.Lock()
 	defer handleLock.Unlock()
 
-	addr := (uintptr)(unsafe.Pointer(&b[0]))
+	if m.backend == nil {
+		return nil
+	}
+
+	addr := (uintptr)(unsafe.Pointer(&m.backend[0]))
 	if err := syscall.UnmapViewOfFile(addr); err != nil {
 		return os.NewSyscallError("UnmapViewOfFile", err)
 	}
@@ -120,6 +138,8 @@ func munmap(b []byte) (err error) {
 	if e != nil {
 		return errors.New("close file" + e.Error())
 	}
+	m.backend = nil
+	m.bytes = nil
 	return nil
 }
 

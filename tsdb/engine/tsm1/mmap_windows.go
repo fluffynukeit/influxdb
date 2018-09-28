@@ -43,40 +43,41 @@ func openSharedFile(f *os.File) (file *os.File, err error) {
 	return os.NewFile(uintptr(h), fileName), nil
 }
 
-func NewMmap(f *os.File, offset int64, length int) (*Mmap, err error) {
-	// TODO: Add support for anonymous mapping on windows
-	if f == nil {
-		return make([]byte, length), nil
+func (m *mMap) bytes() (data []byte, err error) {
+
+	if m.backend != nil { // Already open and mapped
+		if m.f == nil { // Anonymous mapping, no pageDelta
+			return m.backend, nil
+		}
+		return m.backend[m.pageDelta:], nil
 	}
 
-	// Offset must be a multiple of the page size, typically 4096. We'll
-	// extend the mmap range at the beginning so that it starts at the 
-	// page boundary, then return a slice starting at the requested offset.
-	pageSize := int64(os.Getpagesize())
-	pageStart := int64((offset / pageSize) * pageSize) // offset to prev boundary
-	pageDelta := offset - pageStart // shift from boundary to requested location
-	mapLength := length + int(pageDelta)
+	// TODO: Add support for anonymous mapping on windows
+	if f == nil {
+		m.backend = make([]byte, m.length)
+		return m.backend, nil
+	}
 
 	// Open a file mapping handle.
-	sizelo := uint32(mapLength >> 32)
-	sizehi := uint32(mapLength) & 0xffffffff
+	sizelo := uint32(m.mapLength >> 32)
+	sizehi := uint32(m.mapLength) & 0xffffffff
 
-	sharedHandle, errno := openSharedFile(f)
+	sharedHandle, errno := openSharedFile(m.f)
 	if errno != nil {
-		return nil, nil, os.NewSyscallError("CreateFile", errno)
+		return os.NewSyscallError("CreateFile", errno)
 	}
 
 	h, errno := syscall.CreateFileMapping(syscall.Handle(sharedHandle.Fd()), nil, syscall.PAGE_READONLY, sizelo, sizehi, nil)
 	if h == 0 {
-		return nil, nil, os.NewSyscallError("CreateFileMapping", errno)
+		return os.NewSyscallError("CreateFileMapping", errno)
 	}
 
 	// Create the memory map.
-	pageStartlo := uint32(pageStart >> 32)
-	pageStarthi := uint32(pageStart) & 0xffffffff
-	addr, errno := syscall.MapViewOfFile(h, syscall.FILE_MAP_READ, pageStartlo, pageStarthi, uintptr(mapLength))
+	pageStartlo := uint32(m.pageStart >> 32)
+	pageStarthi := uint32(m.pageStart) & 0xffffffff
+	addr, errno := syscall.MapViewOfFile(h, syscall.FILE_MAP_READ, pageStartlo, pageStarthi, uintptr(m.mapLength))
 	if addr == 0 {
-		return nil, nil, os.NewSyscallError("MapViewOfFile", errno)
+		return os.NewSyscallError("MapViewOfFile", errno)
 	}
 
 	handleLock.Lock()
@@ -86,27 +87,28 @@ func NewMmap(f *os.File, offset int64, length int) (*Mmap, err error) {
 
 	// Convert to a byte array.
 	hdr := (*reflect.SliceHeader)(unsafe.Pointer(&out))
-	hdr.Data = uintptr(unsafe.Pointer(addr+pageDelta))
-	hdr.Len = length
-	hdr.Cap = length
+	hdr.Data = uintptr(unsafe.Pointer(addr))
+	hdr.Len = m.mapLength
+	hdr.Cap = m.mapLength
 
-	m := &Mmap{}
+	m := &mMap{}
 	m.backend = out
-	m.bytes = out[pageDelta:]
 
-	return m, nil
-
-	return
+	return out[m.pageDelta:], nil
 }
 
 // munmap Windows implementation
 // Based on: https://github.com/edsrzf/mmap-go
 // Based on: https://github.com/boltdb/bolt/bolt_windows.go
-func (m *MMap) close() (err error) {
+func (m *mMap) close() (err error) {
 	handleLock.Lock()
 	defer handleLock.Unlock()
 
 	if m.backend == nil {
+		return nil
+	}
+
+	if m.f == nil { // "anonymous" mapping.  Let GC handle it.
 		return nil
 	}
 
@@ -139,17 +141,16 @@ func (m *MMap) close() (err error) {
 		return errors.New("close file" + e.Error())
 	}
 	m.backend = nil
-	m.bytes = nil
 	return nil
 }
 
 // madviseWillNeed is unsupported on Windows.
-func madviseWillNeed(b []byte) error { return nil }
+func (m *mMap) madviseWillNeed() error { return nil }
 
 // madviseDontNeed is unsupported on Windows.
-func madviseDontNeed(b []byte) error { return nil }
+func (m *mMap) madviseDontNeed() error { return nil }
 
-func madvise(b []byte, advice int) error {
+func (m *mMap) madvise(advice int) error {
 	// Not implemented
 	return nil
 }

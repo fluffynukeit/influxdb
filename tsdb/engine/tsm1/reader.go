@@ -7,7 +7,6 @@ import (
 	"io"
 	"math"
 	"os"
-	"runtime"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -31,6 +30,7 @@ type TSMReader struct {
 	refsWG sync.WaitGroup
 
 	madviseWillNeed bool // Hint to the kernel with MADV_WILLNEED.
+	onDemandMmap bool // mmap/unmap for each op. Useful on 32 bit archs with limited virtual address space
 	mu              sync.RWMutex
 
 	// accessor provides access and decoding of blocks for the reader.
@@ -217,6 +217,15 @@ var WithMadviseWillNeed = func(willNeed bool) tsmReaderOption {
 	}
 }
 
+// WithOnDemandMmap is an option to only mmap TSM files to the address space
+// when needed for an operation and unmap when finished.  Useful for 32-bit
+// architectures where the total TSM space is large (2GB+ typically).
+var WithOnDemandMmap = func(onDemand bool) tsmReaderOption {
+	return func(r *TSMReader) {
+		r.onDemandMmap = onDemand
+	}
+}
+
 // NewTSMReader returns a new TSMReader from the given file.
 func NewTSMReader(f *os.File, options ...tsmReaderOption) (*TSMReader, error) {
 	t := &TSMReader{}
@@ -233,6 +242,7 @@ func NewTSMReader(f *os.File, options ...tsmReaderOption) (*TSMReader, error) {
 	t.accessor = &mmapAccessor{
 		f:            f,
 		mmapWillNeed: t.madviseWillNeed,
+		onDemand: t.onDemandMmap,
 	}
 
 	index, err := t.accessor.init()
@@ -727,7 +737,9 @@ type indirectIndex struct {
 
 	// offsets contains the positions in b for each key.  It points to the 2 byte length of
 	// key.
-	offsets *Mmap
+	offsets []byte
+	// offsetsBuf is the backing data structure for the offsets slice
+	offsetsBuf *mMap
 
 	// minKey, maxKey are the minium and maximum (lexicographically sorted) contained in the
 	// file
@@ -760,10 +772,10 @@ func NewIndirectIndex() *indirectIndex {
 }
 
 func (d *indirectIndex) offset(i int) int {
-	if i < 0 || i+4 > len(d.offsets.bytes) {
+	if i < 0 || i+4 > len(d.offsets) {
 		return -1
 	}
-	return int(binary.BigEndian.Uint32(d.offsets.bytes[i*4 : i*4+4]))
+	return int(binary.BigEndian.Uint32(d.offsets[i*4 : i*4+4]))
 }
 
 func (d *indirectIndex) Seek(key []byte) int {
@@ -777,7 +789,7 @@ func (d *indirectIndex) Seek(key []byte) int {
 func (d *indirectIndex) searchOffset(key []byte) int {
 	// We use a binary search across our indirect offsets (pointers to all the keys
 	// in the index slice).
-	i := bytesutil.SearchBytesFixed(d.offsets.bytes, 4, func(x []byte) bool {
+	i := bytesutil.SearchBytesFixed(d.offsets, 4, func(x []byte) bool {
 		// i is the position in offsets we are at so get offset it points to
 		offset := int32(binary.BigEndian.Uint32(x))
 
@@ -789,13 +801,13 @@ func (d *indirectIndex) searchOffset(key []byte) int {
 	})
 
 	// See if we might have found the right index
-	if i < len(d.offsets.bytes) {
+	if i < len(d.offsets) {
 		return int(i / 4)
 	}
 
 	// The key is not in the index.  i is the index where it would be inserted so return
 	// a value outside our offset range.
-	return int(len(d.offsets.bytes)) / 4
+	return int(len(d.offsets)) / 4
 }
 
 // search returns the byte position of key in the index.  If key is not
@@ -808,7 +820,7 @@ func (d *indirectIndex) search(key []byte) int {
 	// We use a binary search across our indirect offsets (pointers to all the keys
 	// in the index slice).
 	// TODO(sgc): this should be inlined to `indirectIndex` as it is only used here
-	i := bytesutil.SearchBytesFixed(d.offsets.bytes, 4, func(x []byte) bool {
+	i := bytesutil.SearchBytesFixed(d.offsets, 4, func(x []byte) bool {
 		// i is the position in offsets we are at so get offset it points to
 		offset := int32(binary.BigEndian.Uint32(x))
 
@@ -820,8 +832,8 @@ func (d *indirectIndex) search(key []byte) int {
 	})
 
 	// See if we might have found the right index
-	if i < len(d.offsets.bytes) {
-		ofs := binary.BigEndian.Uint32(d.offsets.bytes[i : i+4])
+	if i < len(d.offsets) {
+		ofs := binary.BigEndian.Uint32(d.offsets[i : i+4])
 		_, k := readKey(d.b[ofs:])
 
 		// The search may have returned an i == 0 which could indicated that the value
@@ -906,10 +918,10 @@ func (d *indirectIndex) Key(idx int, entries *[]IndexEntry) ([]byte, byte, []Ind
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 
-	if idx < 0 || idx*4+4 > len(d.offsets.bytes) {
+	if idx < 0 || idx*4+4 > len(d.offsets) {
 		return nil, 0, nil
 	}
-	ofs := binary.BigEndian.Uint32(d.offsets.bytes[idx*4 : idx*4+4])
+	ofs := binary.BigEndian.Uint32(d.offsets[idx*4 : idx*4+4])
 	n, key := readKey(d.b[ofs:])
 
 	typ := d.b[int(ofs)+n]
@@ -932,11 +944,11 @@ func (d *indirectIndex) Key(idx int, entries *[]IndexEntry) ([]byte, byte, []Ind
 func (d *indirectIndex) KeyAt(idx int) ([]byte, byte) {
 	d.mu.RLock()
 
-	if idx < 0 || idx*4+4 > len(d.offsets.bytes) {
+	if idx < 0 || idx*4+4 > len(d.offsets) {
 		d.mu.RUnlock()
 		return nil, 0
 	}
-	ofs := int32(binary.BigEndian.Uint32(d.offsets.bytes[idx*4 : idx*4+4]))
+	ofs := int32(binary.BigEndian.Uint32(d.offsets[idx*4 : idx*4+4]))
 
 	n, key := readKey(d.b[ofs:])
 	ofs = ofs + int32(n)
@@ -948,7 +960,7 @@ func (d *indirectIndex) KeyAt(idx int) ([]byte, byte) {
 // KeyCount returns the count of unique keys in the index.
 func (d *indirectIndex) KeyCount() int {
 	d.mu.RLock()
-	n := len(d.offsets.bytes) / 4
+	n := len(d.offsets) / 4
 	d.mu.RUnlock()
 	return n
 }
@@ -967,8 +979,8 @@ func (d *indirectIndex) Delete(keys [][]byte) {
 	// any keys that exist in both.
 	d.mu.Lock()
 	start := d.searchOffset(keys[0])
-	for i := start * 4; i+4 <= len(d.offsets.bytes) && len(keys) > 0; i += 4 {
-		offset := binary.BigEndian.Uint32(d.offsets.bytes[i : i+4])
+	for i := start * 4; i+4 <= len(d.offsets) && len(keys) > 0; i += 4 {
+		offset := binary.BigEndian.Uint32(d.offsets[i : i+4])
 		_, indexKey := readKey(d.b[offset:])
 
 		for len(keys) > 0 && bytes.Compare(keys[0], indexKey) < 0 {
@@ -977,10 +989,10 @@ func (d *indirectIndex) Delete(keys [][]byte) {
 
 		if len(keys) > 0 && bytes.Equal(keys[0], indexKey) {
 			keys = keys[1:]
-			copy(d.offsets.bytes[i:i+4], nilOffset[:])
+			copy(d.offsets[i:i+4], nilOffset[:])
 		}
 	}
-	d.offsets.bytes = bytesutil.Pack(d.offsets.bytes, 4, 255)
+	d.offsets = bytesutil.Pack(d.offsets, 4, 255)
 	d.mu.Unlock()
 }
 
@@ -1270,12 +1282,13 @@ func (d *indirectIndex) UnmarshalBinary(b []byte) error {
 	d.maxTime = maxTime
 
 	var err error
-	d.offsets, err = NewMmap(nil, 0, len(offsets)*4)
+	d.offsetsBuf = NewMMap(nil, 0, len(offsets)*4)
+	d.offsets, err = d.offsetsBuf.bytes()
 	if err != nil {
 		return err
 	}
 	for i, v := range offsets {
-		binary.BigEndian.PutUint32(d.offsets.bytes[i*4:i*4+4], uint32(v))
+		binary.BigEndian.PutUint32(d.offsets[i*4:i*4+4], uint32(v))
 	}
 
 	return nil
@@ -1290,11 +1303,7 @@ func (d *indirectIndex) Size() uint32 {
 }
 
 func (d *indirectIndex) Close() error {
-	// Windows doesn't use the anonymous map for the offsets index
-	if runtime.GOOS == "windows" {
-		return nil
-	}
-	return d.offsets.close()
+	return d.offsetsBuf.close()
 }
 
 // mmapAccess is mmap based block accessor.  It access blocks through an
@@ -1304,29 +1313,36 @@ type mmapAccessor struct {
 	freeCount   uint64 // Counter to determine whether the accessor can free its resources
 
 	mmapWillNeed bool // If true then mmap advise value MADV_WILLNEED will be provided the kernel for b.
+	onDemand bool     // If true, TSM block data are mmapped only as long as necessary.
 
 	mu sync.RWMutex
-	b  *Mmap // Mmap for the block data range of the TSM file
-	i  *Mmap // Mmap for the index data range of the TSM file
+	b  *mMap // mMap for the block data range of the TSM file
+	i  *mMap // mMap for the index data range of the TSM file
 	f  *os.File
 
 	index *indirectIndex
 }
 
-func (m *mmapAccessor) init() (*indirectIndex, error) {
+func (m *mmapAccessor) init() (i *indirectIndex, err error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if err := verifyVersion(m.f); err != nil {
+	if err = verifyVersion(m.f); err != nil {
 		return nil, err
 	}
 
-	if err := m.noLockMmapInit(); err != nil {
+	if err = m.noLockmMapInit(); err != nil {
 		return nil, err
 	}
 
 	m.index = NewIndirectIndex()
-	if err := m.index.UnmarshalBinary(m.i.bytes); err != nil {
+
+	var b []byte
+	if b, err = m.i.bytes(); err != nil {
+		return nil, err
+	}
+
+	if err = m.index.UnmarshalBinary(b); err != nil {
 		return nil, err
 	}
 
@@ -1337,7 +1353,7 @@ func (m *mmapAccessor) init() (*indirectIndex, error) {
 	return m.index, nil
 }
 
-func (m *mmapAccessor) noLockMmapInit() error {
+func (m *mmapAccessor) noLockmMapInit() error {
 
 	if _, err := m.f.Seek(0, 0); err != nil {
 		return err
@@ -1354,35 +1370,27 @@ func (m *mmapAccessor) noLockMmapInit() error {
 	if indexOfsPos < 0 {
 		return fmt.Errorf("mmapAccessor: file too small for indirectIndex")
 	}
-	var indexOfs *Mmap
-	indexOfs, err = NewMmap(m.f, indexOfsPos, 8)
-	defer indexOfs.close() // don't need this anymore
-
+	indexOfsBuf := NewMMap(m.f, indexOfsPos, 8)
+	defer indexOfsBuf.close() // don't need this anymore
+	var indexOfs []byte
+	indexOfs, err = indexOfsBuf.bytes()
 	if err != nil {
 		return  err
 	}
 
-	indexStart := binary.BigEndian.Uint64(indexOfs.bytes)
+	indexStart := binary.BigEndian.Uint64(indexOfs)
 	if indexStart >= uint64(indexOfsPos) {
 		return fmt.Errorf("mmapAccessor: invalid indexStart")
 	}
 
 	// mmap the index section of the file and the block data sections
-	// separately. First index region:
-	m.i, err = NewMmap(m.f, int64(indexStart), int(indexOfsPos-int64(indexStart)))
-	if err != nil {
-		return err
-	}
-
-	m.b, err = NewMmap(m.f, 0, int(indexStart)) // block region
-	if err != nil {
-		m.i.close()
-		return err
-	}
+	// separately.
+	m.i = NewMMap(m.f, int64(indexStart), int(indexOfsPos-int64(indexStart)))
+	m.b = NewMMap(m.f, 0, int(indexStart))
 
 	// Hint to the kernel that we will be reading the index.
 	if m.mmapWillNeed {
-		if err := madviseWillNeed(m.i.bytes); err != nil {
+		if err := m.i.madviseWillNeed(); err != nil {
 			return err
 		}
 	}
@@ -1413,7 +1421,7 @@ func (m *mmapAccessor) free() error {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	return madviseDontNeed(m.b.bytes)
+	return m.b.madviseDontNeed()
 }
 
 func (m *mmapAccessor) incAccess() {
@@ -1437,7 +1445,7 @@ func (m *mmapAccessor) rename(path string) (err error) {
 		return err
 	}
 
-	return m.noLockMmapInit()
+	return m.noLockmMapInit()
 }
 
 func (m *mmapAccessor) read(key []byte, timestamp int64) ([]Value, error) {
@@ -1449,43 +1457,54 @@ func (m *mmapAccessor) read(key []byte, timestamp int64) ([]Value, error) {
 	return m.readBlock(entry, nil)
 }
 
-func (m *mmapAccessor) readBlock(entry *IndexEntry, values []Value) ([]Value, error) {
+func (m *mmapAccessor) readBlock(entry *IndexEntry, values []Value) (v []Value, err error) {
 	m.incAccess()
 
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	if int64(len(m.b.bytes)) < entry.Offset+int64(entry.Size) {
-		return nil, ErrTSMClosed
-	}
-	//TODO: Validate checksum
-	var err error
-	values, err = DecodeBlock(m.b.bytes[entry.Offset+4:entry.Offset+int64(entry.Size)], values)
+	var b []byte
+	b, err = m.b.bytes()
 	if err != nil {
 		return nil, err
 	}
 
-	return values, nil
+	if int64(len(b)) < entry.Offset+int64(entry.Size) {
+		return nil, ErrTSMClosed
+	}
+	//TODO: Validate checksum
+	v, err = DecodeBlock(b[entry.Offset+4:entry.Offset+int64(entry.Size)], values)
+	if err != nil {
+		return nil, err
+	}
+
+	return v, nil
 }
 
 func (m *mmapAccessor) readBytes(entry *IndexEntry, b []byte) (uint32, []byte, error) {
 	m.incAccess()
 
 	m.mu.RLock()
-	if int64(len(m.b.bytes)) < entry.Offset+int64(entry.Size) {
+
+	b, err := m.b.bytes()
+	if err != nil {
+		return 0, nil, err
+	}
+
+	if int64(len(b)) < entry.Offset+int64(entry.Size) {
 		m.mu.RUnlock()
 		return 0, nil, ErrTSMClosed
 	}
 
 	// return the bytes after the 4 byte checksum
-	crc, block := binary.BigEndian.Uint32(m.b.bytes[entry.Offset:entry.Offset+4]), m.b.bytes[entry.Offset+4:entry.Offset+int64(entry.Size)]
+	crc, block := binary.BigEndian.Uint32(b[entry.Offset:entry.Offset+4]), b[entry.Offset+4:entry.Offset+int64(entry.Size)]
 	m.mu.RUnlock()
 
 	return crc, block, nil
 }
 
 // readAll returns all values for a key in all blocks.
-func (m *mmapAccessor) readAll(key []byte) ([]Value, error) {
+func (m *mmapAccessor) readAll(key []byte) (values []Value, err error) {
 	m.incAccess()
 
 	blocks := m.index.Entries(key)
@@ -1499,8 +1518,12 @@ func (m *mmapAccessor) readAll(key []byte) ([]Value, error) {
 	defer m.mu.RUnlock()
 
 	var temp []Value
-	var err error
-	var values []Value
+	var b []byte
+	b, err = m.b.bytes()
+	if err != nil {
+		return nil, err
+	}
+
 	for _, block := range blocks {
 		var skip bool
 		for _, t := range tombstones {
@@ -1517,7 +1540,7 @@ func (m *mmapAccessor) readAll(key []byte) ([]Value, error) {
 		//TODO: Validate checksum
 		temp = temp[:0]
 		// The +4 is the 4 byte checksum length
-		temp, err = DecodeBlock(m.b.bytes[block.Offset+4:block.Offset+int64(block.Size)], temp)
+		temp, err = DecodeBlock(b[block.Offset+4:block.Offset+int64(block.Size)], temp)
 		if err != nil {
 			return nil, err
 		}

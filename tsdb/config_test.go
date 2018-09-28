@@ -16,6 +16,7 @@ dir = "/var/lib/influxdb/data"
 wal-dir = "/var/lib/influxdb/wal"
 wal-fsync-delay = "10s"
 tsm-use-madv-willneed = true
+tsm-on-demand-mmap = true
 `, &c); err != nil {
 		t.Fatal(err)
 	}
@@ -35,6 +36,9 @@ tsm-use-madv-willneed = true
 	}
 	if got, exp := c.TSMWillNeed, true; got != exp {
 		t.Errorf("unexpected tsm-madv-willneed:\n\nexp=%v\n\ngot=%v\n\n", exp, got)
+	}
+	if got, exp := c.TSMOnDemand, true; got != exp {
+		t.Errorf("unexpected tsm-on-demand-mmap\n\nexp=%v\n\ngot=%v\n\n", exp, got)
 	}
 }
 

@@ -3,42 +3,40 @@
 package tsm1
 
 import (
-	"os"
 	"syscall"
 
 	"golang.org/x/sys/unix"
 )
 
-func NewMmap(f *os.File, offset int64, length int) (m *Mmap, err error) {
-	// Offset must be a multiple of the page size, typically 4096. We'll
-	// extend the mmap range at the beginning so that it starts at the 
-	// page boundary, then return a slice starting at the requested offset.
-	pageSize := int64(os.Getpagesize())
-	pageStart := int64((offset / pageSize) * pageSize) // offset to prev boundary
-	pageDelta := offset - pageStart // shift from boundary to requested location
-	mapLength := length + int(pageDelta)
 
-	// anonymous mapping
+// Returns a slice to the mapping data, creating the mapping if necessary.
+func (m *mMap) bytes() (data []byte, err error) {
+
+	if m.backend != nil { // data available and ready to go
+		return m.backend[m.pageDelta:], nil
+	}
+
+	// anonymous mapping if f == nil
 	var mmap []byte
-	if f == nil {
-		mmap, err = unix.Mmap(-1, pageStart, mapLength, syscall.PROT_READ|syscall.PROT_WRITE, syscall.MAP_ANON|syscall.MAP_PRIVATE)
+	if m.f == nil {
+		mmap, err = unix.Mmap(-1, m.pageStart, m.mapLength, syscall.PROT_READ|syscall.PROT_WRITE, syscall.MAP_ANON|syscall.MAP_PRIVATE)
 	} else {
-		mmap, err = unix.Mmap(int(f.Fd()), pageStart, mapLength, syscall.PROT_READ, syscall.MAP_SHARED)
+		mmap, err = unix.Mmap(int(m.f.Fd()), m.pageStart, m.mapLength, syscall.PROT_READ, syscall.MAP_SHARED)
 	}
 
 	if err != nil {
 		return nil, err
 	}
 
-	m = &Mmap{}
 	m.backend = mmap
-	m.bytes = mmap[pageDelta:]
+	data = mmap[m.pageDelta:]
 
-	return m, nil
+	return data, nil
 }
 
-func (m *Mmap) close() error {
-	if m.backend == nil {
+// Release map resources.
+func (m *mMap) close() error {
+	if m.backend == nil { // already closed
 		return nil
 	}
 
@@ -47,21 +45,24 @@ func (m *Mmap) close() error {
 		return err
 	}
 	m.backend = nil
-	m.bytes = nil
 	return nil
 }
 
 // madviseWillNeed gives the kernel the mmap madvise value MADV_WILLNEED, hinting
 // that we plan on using the provided buffer in the near future.
-func madviseWillNeed(b []byte) error {
-	return madvise(b, syscall.MADV_WILLNEED)
+func (m *mMap) madviseWillNeed() error {
+	return m.madvise(syscall.MADV_WILLNEED)
 }
 
-func madviseDontNeed(b []byte) error {
-	return madvise(b, syscall.MADV_DONTNEED)
+func (m *mMap) madviseDontNeed() error {
+	return m.madvise(syscall.MADV_DONTNEED)
 }
 
 // From: github.com/boltdb/bolt/bolt_unix.go
-func madvise(b []byte, advice int) (err error) {
+func (m *mMap) madvise(advice int) error {
+	b, err := m.bytes()
+	if err != nil {
+		return err
+	}
 	return unix.Madvise(b, advice)
 }

@@ -127,6 +127,12 @@ type Config struct {
 	// been found to be problematic in some cases. It may help users who have
 	// slow disks.
 	TSMWillNeed bool `toml:"tsm-use-madv-willneed"`
+
+	// TSMOnDemand controls whether mmaps of TSM block data are held persistently
+	// or only as needed.  For 64 bit architectures, this is unlikely to be
+	// necessary.  For 32 bit with aggregate TSM file size 2GB+, it is 
+	// required.
+	TSMOnDemand bool `toml:"tsm-on-demand-mmap"`
 }
 
 // NewConfig returns the default configuration for tsdb.
@@ -152,6 +158,7 @@ func NewConfig() Config {
 
 		TraceLoggingEnabled: false,
 		TSMWillNeed:         false,
+		TSMOnDemand:         false,
 	}
 }
 

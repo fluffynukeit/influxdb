@@ -45,12 +45,17 @@ func (m *mmapAccessor) read{{.Name}}Block(entry *IndexEntry, values *[]{{.Name}}
 	m.incAccess()
 
 	m.mu.RLock()
-	if int64(len(m.b.bytes)) < entry.Offset+int64(entry.Size) {
+	b, err := m.b.bytes()
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(b)) < entry.Offset+int64(entry.Size) {
 		m.mu.RUnlock()
 		return nil, ErrTSMClosed
 	}
 
-	a, err := Decode{{.Name}}Block(m.b.bytes[entry.Offset+4:entry.Offset+int64(entry.Size)], values)
+	var a []{{.Name}}Value
+	a, err = Decode{{.Name}}Block(b[entry.Offset+4:entry.Offset+int64(entry.Size)], values)
 	m.mu.RUnlock()
 
 	if err != nil {
@@ -64,12 +69,16 @@ func (m *mmapAccessor) read{{.Name}}ArrayBlock(entry *IndexEntry, values *tsdb.{
 	m.incAccess()
 
 	m.mu.RLock()
-	if int64(len(m.b.bytes)) < entry.Offset+int64(entry.Size) {
+	b, err := m.b.bytes()
+	if err != nil {
+		return err
+	}
+	if int64(len(b)) < entry.Offset+int64(entry.Size) {
 		m.mu.RUnlock()
 		return ErrTSMClosed
 	}
 
-	err := Decode{{.Name}}ArrayBlock(m.b.bytes[entry.Offset+4:entry.Offset+int64(entry.Size)], values)
+	err = Decode{{.Name}}ArrayBlock(b[entry.Offset+4:entry.Offset+int64(entry.Size)], values)
 	m.mu.RUnlock()
 
 	return err

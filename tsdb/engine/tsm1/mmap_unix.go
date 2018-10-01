@@ -9,7 +9,8 @@ import (
 )
 
 
-// Returns a slice to the mapping data, creating the mapping if necessary.
+// Returns a slice to the mapping data, creating the mapping if not initialized
+// or previously released().
 func (m *mMap) bytes() (data []byte, err error) {
 
 	if m.backend != nil { // data available and ready to go
@@ -34,9 +35,9 @@ func (m *mMap) bytes() (data []byte, err error) {
 	return data, nil
 }
 
-// Release map resources.
-func (m *mMap) close() error {
-	if m.backend == nil { // already closed
+// Release map resources. 
+func (m *mMap) release() error {
+	if m.backend == nil { // already released
 		return nil
 	}
 

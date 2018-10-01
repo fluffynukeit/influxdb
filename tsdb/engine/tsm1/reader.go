@@ -1303,7 +1303,8 @@ func (d *indirectIndex) Size() uint32 {
 }
 
 func (d *indirectIndex) Close() error {
-	return d.offsetsBuf.close()
+	d.offsets = nil
+	return d.offsetsBuf.release()
 }
 
 // mmapAccess is mmap based block accessor.  It access blocks through an
@@ -1371,7 +1372,7 @@ func (m *mmapAccessor) noLockmMapInit() error {
 		return fmt.Errorf("mmapAccessor: file too small for indirectIndex")
 	}
 	indexOfsBuf := NewMMap(m.f, indexOfsPos, 8)
-	defer indexOfsBuf.close() // don't need this anymore
+	defer indexOfsBuf.release() // don't need this anymore
 	var indexOfs []byte
 	indexOfs, err = indexOfsBuf.bytes()
 	if err != nil {
@@ -1468,6 +1469,9 @@ func (m *mmapAccessor) readBlock(entry *IndexEntry, values []Value) (v []Value, 
 	if err != nil {
 		return nil, err
 	}
+	if m.onDemand {
+		defer m.b.release()
+	}
 
 	if int64(len(b)) < entry.Offset+int64(entry.Size) {
 		return nil, ErrTSMClosed
@@ -1489,6 +1493,9 @@ func (m *mmapAccessor) readBytes(entry *IndexEntry, b []byte) (uint32, []byte, e
 	b, err := m.b.bytes()
 	if err != nil {
 		return 0, nil, err
+	}
+	if m.onDemand {
+		defer m.b.release()
 	}
 
 	if int64(len(b)) < entry.Offset+int64(entry.Size) {
@@ -1522,6 +1529,9 @@ func (m *mmapAccessor) readAll(key []byte) (values []Value, err error) {
 	b, err = m.b.bytes()
 	if err != nil {
 		return nil, err
+	}
+	if m.onDemand {
+		defer m.b.release()
 	}
 
 	for _, block := range blocks {
@@ -1571,12 +1581,12 @@ func (m *mmapAccessor) close() error {
 
 func (m *mmapAccessor) noLockClose() (err error) {
 
-	err = m.i.close()
+	err = m.i.release()
 	if err != nil {
 		return err
 	}
 
-	err = m.b.close()
+	err = m.b.release()
 	if err != nil {
 		return err
 	}

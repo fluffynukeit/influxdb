@@ -97,10 +97,11 @@ func (m *mMap) bytes() (data []byte, err error) {
 	return out[m.pageDelta:], nil
 }
 
+// Release map resources. 
 // munmap Windows implementation
 // Based on: https://github.com/edsrzf/mmap-go
 // Based on: https://github.com/boltdb/bolt/bolt_windows.go
-func (m *mMap) close() (err error) {
+func (m *mMap) release() (err error) {
 	handleLock.Lock()
 	defer handleLock.Unlock()
 

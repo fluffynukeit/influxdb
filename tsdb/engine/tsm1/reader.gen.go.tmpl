@@ -49,6 +49,9 @@ func (m *mmapAccessor) read{{.Name}}Block(entry *IndexEntry, values *[]{{.Name}}
 	if err != nil {
 		return nil, err
 	}
+	if m.onDemand {
+		defer m.b.release()
+	}
 	if int64(len(b)) < entry.Offset+int64(entry.Size) {
 		m.mu.RUnlock()
 		return nil, ErrTSMClosed
@@ -72,6 +75,9 @@ func (m *mmapAccessor) read{{.Name}}ArrayBlock(entry *IndexEntry, values *tsdb.{
 	b, err := m.b.bytes()
 	if err != nil {
 		return err
+	}
+	if m.onDemand {
+		defer m.b.release()
 	}
 	if int64(len(b)) < entry.Offset+int64(entry.Size) {
 		m.mu.RUnlock()

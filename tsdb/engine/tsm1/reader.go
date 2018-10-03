@@ -1504,7 +1504,16 @@ func (m *mmapAccessor) readBytes(entry *IndexEntry, b []byte) (uint32, []byte, e
 	}
 
 	// return the bytes after the 4 byte checksum
-	crc, block := binary.BigEndian.Uint32(b[entry.Offset:entry.Offset+4]), b[entry.Offset+4:entry.Offset+int64(entry.Size)]
+	crc := binary.BigEndian.Uint32(b[entry.Offset:entry.Offset+4])
+	block := b[entry.Offset+4:entry.Offset+int64(entry.Size)]
+
+	if m.onDemand {
+		// Copy to another buffer because we'll unmap m.b soon.
+		tmp := make([]byte, len(block))
+		copy(tmp, block)
+		block = tmp
+	}
+
 	m.mu.RUnlock()
 
 	return crc, block, nil

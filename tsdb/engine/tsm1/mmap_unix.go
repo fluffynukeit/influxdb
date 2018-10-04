@@ -8,7 +8,6 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-
 // Returns a slice to the mapping data, creating the mapping if not initialized
 // or previously released().
 func (m *mMap) bytes() (data []byte, err error) {
@@ -35,7 +34,7 @@ func (m *mMap) bytes() (data []byte, err error) {
 	return data, nil
 }
 
-// Release map resources. 
+// Release map resources.
 func (m *mMap) release() error {
 	if m.backend == nil { // already released
 		return nil

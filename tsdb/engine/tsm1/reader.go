@@ -30,7 +30,7 @@ type TSMReader struct {
 	refsWG sync.WaitGroup
 
 	madviseWillNeed bool // Hint to the kernel with MADV_WILLNEED.
-	onDemandMmap bool // mmap/unmap for each op. Useful on 32 bit archs with limited virtual address space
+	onDemandMmap    bool // mmap/unmap for each op. Useful on 32 bit archs with limited virtual address space
 	mu              sync.RWMutex
 
 	// accessor provides access and decoding of blocks for the reader.
@@ -242,7 +242,7 @@ func NewTSMReader(f *os.File, options ...tsmReaderOption) (*TSMReader, error) {
 	t.accessor = &mmapAccessor{
 		f:            f,
 		mmapWillNeed: t.madviseWillNeed,
-		onDemand: t.onDemandMmap,
+		onDemand:     t.onDemandMmap,
 	}
 
 	index, err := t.accessor.init()
@@ -1314,7 +1314,7 @@ type mmapAccessor struct {
 	freeCount   uint64 // Counter to determine whether the accessor can free its resources
 
 	mmapWillNeed bool // If true then mmap advise value MADV_WILLNEED will be provided the kernel for b.
-	onDemand bool     // If true, TSM block data are mmapped only as long as necessary.
+	onDemand     bool // If true, TSM block data are mmapped only as long as necessary.
 
 	mu sync.RWMutex
 	b  *mMap // mMap for the block data range of the TSM file
@@ -1376,7 +1376,7 @@ func (m *mmapAccessor) noLockmMapInit() error {
 	var indexOfs []byte
 	indexOfs, err = indexOfsBuf.bytes()
 	if err != nil {
-		return  err
+		return err
 	}
 
 	indexStart := binary.BigEndian.Uint64(indexOfs)
@@ -1504,8 +1504,8 @@ func (m *mmapAccessor) readBytes(entry *IndexEntry, b []byte) (uint32, []byte, e
 	}
 
 	// return the bytes after the 4 byte checksum
-	crc := binary.BigEndian.Uint32(b[entry.Offset:entry.Offset+4])
-	block := b[entry.Offset+4:entry.Offset+int64(entry.Size)]
+	crc := binary.BigEndian.Uint32(b[entry.Offset : entry.Offset+4])
+	block := b[entry.Offset+4 : entry.Offset+int64(entry.Size)]
 
 	if m.onDemand {
 		// Copy to another buffer because we'll unmap m.b soon.

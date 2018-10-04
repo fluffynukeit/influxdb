@@ -97,7 +97,7 @@ func (m *mMap) bytes() (data []byte, err error) {
 	return out[m.pageDelta:], nil
 }
 
-// Release map resources. 
+// Release map resources.
 // munmap Windows implementation
 // Based on: https://github.com/edsrzf/mmap-go
 // Based on: https://github.com/boltdb/bolt/bolt_windows.go

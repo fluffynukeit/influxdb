@@ -130,7 +130,7 @@ type Config struct {
 
 	// TSMOnDemand controls whether mmaps of TSM block data are held persistently
 	// or only as needed.  For 64 bit architectures, this is unlikely to be
-	// necessary.  For 32 bit with aggregate TSM file size 2GB+, it is 
+	// necessary.  For 32 bit with aggregate TSM file size 2GB+, it is
 	// required.
 	TSMOnDemand bool `toml:"tsm-on-demand-mmap"`
 }

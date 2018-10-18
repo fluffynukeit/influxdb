@@ -134,6 +134,13 @@
   # It might help users who have slow disks in some cases.
   # tsm-use-madv-willneed = false
 
+  # If true, then TSM files' indices will always be memory mapped, but block data
+  # will be memory mapped as needed and unmapped afterward.  This is required
+  # on 32 bit systems with TSM files that have aggregate size larger than the
+  # process memory limit (typically 2 or 3 GB).
+  # tsm-on-demand-mmap = false
+
+
 ###
 ### [coordinator]
 ###

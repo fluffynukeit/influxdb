@@ -60,9 +60,8 @@ func (m *mMap) madviseDontNeed() error {
 
 // From: github.com/boltdb/bolt/bolt_unix.go
 func (m *mMap) madvise(advice int) error {
-	b, err := m.bytes()
-	if err != nil {
-		return err
+	if m.backend == nil { // not allocated or already freed
+		return nil
 	}
-	return unix.Madvise(b, advice)
+	return unix.Madvise(m.backend, advice)
 }

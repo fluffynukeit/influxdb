@@ -40,9 +40,9 @@ func (m *mMap) release() error {
 		return nil
 	}
 
-	err := unix.Munmap(m.backend)
-	if err != nil {
-		return err
+	err_unmap := unix.Munmap(m.backend)
+	if err_unmap != nil {
+		return err_unmap
 	}
 	m.backend = nil
 	return nil

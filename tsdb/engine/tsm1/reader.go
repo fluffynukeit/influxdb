@@ -1349,12 +1349,12 @@ func (m *mmapAccessor) init() (i *indirectIndex, err error) {
 
 	// Allow resources to be freed immediately if requested
 	m.incAccess()
-	atomic.StoreUint64(&m.freeCount, 1)
+	m.decAccess()
 
 	return m.index, nil
 }
 
-func (m *mmapAccessor) noLockmMapInit() error {
+func (m *mmapAccessor) noLockmMapInit() (e error) {
 
 	if _, err := m.f.Seek(0, 0); err != nil {
 		return err
@@ -1372,7 +1372,12 @@ func (m *mmapAccessor) noLockmMapInit() error {
 		return fmt.Errorf("mmapAccessor: file too small for indirectIndex")
 	}
 	indexOfsBuf := NewMMap(m.f, indexOfsPos, 8)
-	defer indexOfsBuf.release() // don't need this anymore
+	defer func() {
+		err := indexOfsBuf.release() // don't need this anymore var indexOfs []byte
+		if e == nil {
+			e = err
+		}
+	}()
 	var indexOfs []byte
 	indexOfs, err = indexOfsBuf.bytes()
 	if err != nil {
@@ -1402,35 +1407,43 @@ func (m *mmapAccessor) free() error {
 	accessCount := atomic.LoadUint64(&m.accessCount)
 	freeCount := atomic.LoadUint64(&m.freeCount)
 
-	// Already freed everything.
-	if freeCount == 0 && accessCount == 0 {
+	// Already freed everything or something still being accessed
+	if (freeCount == 0 && accessCount == 0) || accessCount != freeCount {
 		return nil
 	}
 
-	// Were there accesses after the last time we tried to free?
-	// If so, don't free anything and record the access count that we
-	// see now for the next check.
-	if accessCount != freeCount {
-		atomic.StoreUint64(&m.freeCount, accessCount)
-		return nil
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	if m.onDemand { // release block memory mappings made on-demand
+		if err := m.b.release(); err != nil {
+			return err
+		}
 	}
 
 	// Reset both counters to zero to indicate that we have freed everything.
 	atomic.StoreUint64(&m.accessCount, 0)
 	atomic.StoreUint64(&m.freeCount, 0)
-
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
 	return m.b.madviseDontNeed()
+}
+
+func (m *mmapAccessor) freeErr(err *error) {
+	e := m.free()
+	if *err == nil {
+		*err = e
+	}
 }
 
 func (m *mmapAccessor) incAccess() {
 	atomic.AddUint64(&m.accessCount, 1)
 }
+func (m *mmapAccessor) decAccess() {
+	atomic.AddUint64(&m.freeCount, 1)
+}
 
 func (m *mmapAccessor) rename(path string) (err error) {
 	m.incAccess()
+	defer m.decAccess()
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -1460,6 +1473,7 @@ func (m *mmapAccessor) read(key []byte, timestamp int64) ([]Value, error) {
 
 func (m *mmapAccessor) readBlock(entry *IndexEntry, values []Value) (v []Value, err error) {
 	m.incAccess()
+	defer m.decAccess()
 
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -1470,7 +1484,7 @@ func (m *mmapAccessor) readBlock(entry *IndexEntry, values []Value) (v []Value, 
 		return nil, err
 	}
 	if m.onDemand {
-		defer m.b.release()
+		defer m.freeErr(&err)
 	}
 
 	if int64(len(b)) < entry.Offset+int64(entry.Size) {
@@ -1478,6 +1492,14 @@ func (m *mmapAccessor) readBlock(entry *IndexEntry, values []Value) (v []Value, 
 	}
 	//TODO: Validate checksum
 	v, err = DecodeBlock(b[entry.Offset+4:entry.Offset+int64(entry.Size)], values)
+
+	if m.onDemand {
+		// Copy to another buffer because we'll unmap m.b soon.
+		tmp := make([]Value, len(v))
+		copy(tmp, v)
+		v = tmp
+	}
+
 	if err != nil {
 		return nil, err
 	}
@@ -1485,21 +1507,22 @@ func (m *mmapAccessor) readBlock(entry *IndexEntry, values []Value) (v []Value, 
 	return v, nil
 }
 
-func (m *mmapAccessor) readBytes(entry *IndexEntry, b []byte) (uint32, []byte, error) {
+func (m *mmapAccessor) readBytes(entry *IndexEntry, b []byte) (_ uint32, _ []byte, e error) {
 	m.incAccess()
+	defer m.decAccess()
 
 	m.mu.RLock()
+	defer m.mu.RUnlock()
 
 	b, err := m.b.bytes()
 	if err != nil {
 		return 0, nil, err
 	}
 	if m.onDemand {
-		defer m.b.release()
+		defer m.freeErr(&e)
 	}
 
 	if int64(len(b)) < entry.Offset+int64(entry.Size) {
-		m.mu.RUnlock()
 		return 0, nil, ErrTSMClosed
 	}
 
@@ -1514,14 +1537,13 @@ func (m *mmapAccessor) readBytes(entry *IndexEntry, b []byte) (uint32, []byte, e
 		block = tmp
 	}
 
-	m.mu.RUnlock()
-
 	return crc, block, nil
 }
 
 // readAll returns all values for a key in all blocks.
 func (m *mmapAccessor) readAll(key []byte) (values []Value, err error) {
 	m.incAccess()
+	defer m.decAccess()
 
 	blocks := m.index.Entries(key)
 	if len(blocks) == 0 {
@@ -1540,7 +1562,7 @@ func (m *mmapAccessor) readAll(key []byte) (values []Value, err error) {
 		return nil, err
 	}
 	if m.onDemand {
-		defer m.b.release()
+		defer m.freeErr(&err)
 	}
 
 	for _, block := range blocks {
@@ -1588,9 +1610,9 @@ func (m *mmapAccessor) close() error {
 	return m.noLockClose()
 }
 
-func (m *mmapAccessor) noLockClose() (err error) {
+func (m *mmapAccessor) noLockClose() error {
 
-	err = m.i.release()
+	err := m.i.release()
 	if err != nil {
 		return err
 	}

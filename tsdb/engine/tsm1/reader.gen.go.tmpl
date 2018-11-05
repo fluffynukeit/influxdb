@@ -41,25 +41,32 @@ type blockAccessor interface {
 }
 
 {{range .}}
-func (m *mmapAccessor) read{{.Name}}Block(entry *IndexEntry, values *[]{{.Name}}Value) ([]{{.Name}}Value, error) {
+func (m *mmapAccessor) read{{.Name}}Block(entry *IndexEntry, values *[]{{.Name}}Value) (ar []{{.Name}}Value, e error) {
 	m.incAccess()
+	defer m.decAccess()
 
 	m.mu.RLock()
+	defer m.mu.RUnlock()
 	b, err := m.b.bytes()
 	if err != nil {
 		return nil, err
 	}
 	if m.onDemand {
-		defer m.b.release()
+		defer m.freeErr(&e)
 	}
 	if int64(len(b)) < entry.Offset+int64(entry.Size) {
-		m.mu.RUnlock()
 		return nil, ErrTSMClosed
 	}
 
 	var a []{{.Name}}Value
 	a, err = Decode{{.Name}}Block(b[entry.Offset+4:entry.Offset+int64(entry.Size)], values)
-	m.mu.RUnlock()
+
+	if m.onDemand {
+		// Copy to another buffer because we'll unmap m.b soon.
+		tmp := make([]{{.Name}}Value, len(a))
+		copy(tmp, a)
+		a = tmp
+	}
 
 	if err != nil {
 		return nil, err
@@ -68,24 +75,24 @@ func (m *mmapAccessor) read{{.Name}}Block(entry *IndexEntry, values *[]{{.Name}}
 	return a, nil
 }
 
-func (m *mmapAccessor) read{{.Name}}ArrayBlock(entry *IndexEntry, values *tsdb.{{.Name}}Array) error {
+func (m *mmapAccessor) read{{.Name}}ArrayBlock(entry *IndexEntry, values *tsdb.{{.Name}}Array) (e error) {
 	m.incAccess()
+	defer m.decAccess()
 
 	m.mu.RLock()
+	defer m.mu.RUnlock()
 	b, err := m.b.bytes()
 	if err != nil {
 		return err
 	}
 	if m.onDemand {
-		defer m.b.release()
+		defer m.freeErr(&e)
 	}
 	if int64(len(b)) < entry.Offset+int64(entry.Size) {
-		m.mu.RUnlock()
 		return ErrTSMClosed
 	}
 
 	err = Decode{{.Name}}ArrayBlock(b[entry.Offset+4:entry.Offset+int64(entry.Size)], values)
-	m.mu.RUnlock()
 
 	return err
 }
